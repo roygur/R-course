@@ -1,0 +1,106 @@
+---
+title: "2ex"
+author: "Roy Gurwicz"
+date: "7 11 2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Ex 2
+```{r}
+library("compGenomRData")
+counts_file <- system.file("extdata/rna-seq/SRP029880.raw_counts.tsv",package = "compGenomRData")
+coldata_file <- system.file("extdata/rna-seq/SRP029880.colData.tsv",package = "compGenomRData")
+```
+
+# 2. Plot a heatmap of the top 500 most variable genes. 
+# Compare with the heatmap obtained using the 100 most variable genes. Hint : use var() function to compute the variance.
+```{r}
+counts_df <- read.table(counts_file, header = T, sep = '\t')
+counts_mat <- as.matrix(counts_df)
+geneLengths_mat <- subset(counts_mat, select = c(width))
+geneLengths_vector <- as.vector(geneLengths_mat)
+
+rpkm <- apply(X = subset(counts_mat, select = c(-width)),              MARGIN = 2,FUN = function(x) {(x*10^9)/(geneLengths_vector* sum(as.numeric(x)))})
+tpm <- apply(rpkm, 2, function(x) {(x / sum(as.numeric(x))) * 10^6})
+
+gene.var=apply(tpm, 1, var)
+
+# Top 500 most variable genes.
+sort.genes500=sort(gene.var, decreasing = TRUE)[1:500]
+tpm.top500= tpm[names(sort.genes500),]
+heatmap(tpm.top500,main = "Heatmap of 500 most variable genes")
+
+# Top 100 most variable genes.
+sort.genes100=sort(gene.var, decreasing = TRUE)[1:100]
+tpm.top100= tpm[names(sort.genes100),]
+heatmap(tpm.top100,main = "Heatmap of 100 most variable genes")
+```
+
+ 
+# 3. Re-do the heatmaps setting the scale argument to none, and column. Compare the results with scale= 'row'.
+```{r}
+heatmap(tpm.top500,main = "Heatmap of 500 most variable genes")
+heatmap(tpm.top100,main = "Heatmap of 100 most variable genes")
+
+heatmap(tpm.top500,main = "Heatmap of 500 most variable genes- Column", scale = c("column"))
+heatmap(tpm.top100,main = "Heatmap of 100 most variable genes- Column", scale = c("column"))
+
+heatmap(tpm.top500,main = "Heatmap of 500 most variable genes- None", scale = c("none"))
+heatmap(tpm.top100,main = "Heatmap of 100 most variable genes- None", scale = c("none"))
+
+heatmap(tpm.top500,main = "Heatmap of 500 most variable genes- row", scale = c("row"))
+heatmap(tpm.top100,main = "Heatmap of 100 most variable genes- row", scale = c("row"))
+```
+
+# 4. Draw a correlation plot for the samples depicting the sample differences as ‘ellipses’, drawing only the upper end of the matrix, and order samples by hierarchical clustering results based on average linkage clustering method.
+
+```{r}
+corrplot::corrplot(cor(tpm,tpm),method = c('ellipse'),type = c('upper'),order = c('hclust'),hclust.method = c('average'))
+```
+ 
+# 5. How else could the count matrix be subsetted to obtain quick and accurate clusters? 
+## Try selecting the top 100 genes that have the highest total expression in all samples and re-draw the cluster heatmaps and PCA plots.
+```{r}
+sum.top100 <- sort(rowSums(tpm),decreasing = TRUE)[1:100]
+tpm.sum.top100 <- tpm[names(sum.top100),]
+
+## Heat map.
+heatmap(tpm.sum.top100,main = "Heatmap of 100 most highly expressed genes", scale = c("row"))
+heatmap(tpm.sum.top100,main = "Heatmap of 100 most highly expressed genes", scale = c("column"))
+heatmap(tpm.sum.top100,main = "Heatmap of 100 most highly expressed genes", scale = c("none"))
+
+## PCA.
+library(stats)
+library(ggplot2)
+library(ggfortify)
+
+pca <- prcomp(t(tpm.sum.top100))
+autoplot(pca)
+```
+
+
+# 6. Add an additional column to the annotation data.frame object to annotate the samples and use the updated annotation data.frame to plot the heatmaps. 
+## (Hint: Assign different batch values to CASE and CTRL samples). 
+# Make a PCA plot and color samples by the added variable (e.g. batch).
+```{r}
+coldata_df <- read.table(coldata_file, header = T, sep = '\t')
+
+
+pheatmap::pheatmap(tpm.sum.top100,main = "Heatmap of 100 most highly expressed genes",annotation = coldata_df)
+
+pca.sum.top100 <- prcomp(t(tpm.sum.top100))
+autoplot(pca.sum.top100,data = coldata_df,colour = 'group')
+```
+
+# 7. Try making the heatmaps using all the genes in the count table, rather than sub-selecting.
+```{r}
+autoplot(tpm,main = "Heatmap of all genes",annotation = coldata_df)
+autoplot(prcomp(t(tpm)),data = coldata_df,colour = 'group')
+```
+
