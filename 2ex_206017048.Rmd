@@ -12,6 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 # Ex 2
+## Github link- https://github.com/roygur/R-course
 ```{r}
 library("compGenomRData")
 counts_file <- system.file("extdata/rna-seq/SRP029880.raw_counts.tsv",package = "compGenomRData")
