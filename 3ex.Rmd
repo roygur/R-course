@@ -1,0 +1,179 @@
+---
+title: "ex3"
+author: "Roy Gurwicz"
+date: "11 11 2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Doing DESeq2.
+```{r}
+library(ggplot2)
+library(DESeq2)
+
+counts_file <- system.file("extdata/rna-seq/SRP029880.raw_counts.tsv", package = "compGenomRData")
+coldata_file <- system.file("extdata/rna-seq/SRP029880.colData.tsv", package = "compGenomRData")
+
+
+
+counts <- read.table(counts_file,header = T, sep = '\t')
+countData <- as.matrix(subset(counts,select=c(-width)))
+colData <- read.table(coldata_file,header=T,sep='\t',stringsAsFactors = TRUE)
+
+dds <- DESeqDataSetFromMatrix(countData = countData,
+                              colData = colData,
+                              design = ~ group)
+
+filteration <- rowSums(DESeq2::counts(dds)) >= 10
+dds <- dds[filteration,]
+
+dds <- DESeq(dds)
+
+DEresults = results(dds,contrast = c("group",'CASE','CTRL'))
+DEresultsDf <- as.data.frame(DEresults)
+```
+
+# 2. Use DESeq2::plotDispEsts to make a dispersion plot and find out the meaning of this plot. (Hint: Type ?DESeq2::plotDispEsts)
+
+It is a plot of "Mean of (normalized) counts" vs. dispersion. This plot (in red) helps us decide the dispersion via the mean of how much a gene was counted.
+
+```{r}
+DESeq2::plotDispEsts(dds)
+```
+
+
+# 3. Explore lfcThreshold argument of the DESeq2::results function. What is its default value? What does it mean to change the default value to, for instance, 1?
+
+```{r}
+DEresults2Df = as.data.frame(DESeq2::results(dds,contrast = c("group",'CASE','CTRL'),lfcThreshold = 1))
+```
+
+It changes the threshold of the log2 fold change. 
+The default value is 0.
+Changing the default value to 1 the changes the Wald tests so that the p-value and the p-adj also change in acordance to the threshold.
+
+# 4. What is independent filtering? 
+# What happens if we don’t use it? 
+# Google independent filtering statquest and watch the online video about independent filtering.
+```{r}
+DEresults3Df = as.data.frame(DESeq2::results(dds,contrast = c("group",'CASE','CTRL'),independentFiltering = FALSE))
+#DEresults==DEresults3Df
+#DEresultsDf[c("KRT33A"),]
+#DEresults3Df(c("KRT33A"),)
+```
+It is a command which automatically filters genes with low read counts (for example, the gene KRT33A has NA result at its p-value, and therefore if we don't use the independentFiltering argument this gene is written in the data frame.
+
+# 5. Re-do the differential expression analysis using the edgeR package. 
+# Find out how much DESeq2 and edgeR agree on the list of differentially expressed genes.
+They differ in 988 genes, but agree on 18,093 genes. DESeq2 has longer list of genes, which is encountered as differentially expressed, than edgeR.
+```{r}
+library(edgeR)
+counts <- read.table(counts_file,header = T, sep = '\t')
+countData <- as.matrix(subset(counts,select=c(-width)))
+colData <- read.table(coldata_file,header=T,sep='\t',stringsAsFactors = TRUE)
+
+ddsEdge <- DGEList(counts=countData, samples = colData, group = colData$group)
+
+filterationEdge <- filterByExpr(ddsEdge)
+ddsEdge <- ddsEdge[filterationEdge,]
+
+ddsEdge <- calcNormFactors(ddsEdge)
+
+resultsEdge <- model.matrix(~ colData$group)
+
+# Estimates the dispersion.
+ddsEdge <- estimateDisp(ddsEdge,resultsEdge) 
+ddsEdgeDf <- as.data.frame(ddsEdge)
+
+edgeCompare = as.data.frame(row.names(ddsEdge$counts))
+
+DESeq2Compare = as.data.frame(row.names(DEresultsDf))
+
+library(compare)
+comparison <- compare(edgeCompare,DESeq2Compare,allowAll = T)$tM
+
+
+differenceEdge <- lapply(1:ncol(edgeCompare),function(i)setdiff(edgeCompare[,i],comparison[,i]))
+differenceEdgeDf <- data.frame(differenceEdge)
+
+differenceDESeq <- lapply(1:ncol(DESeq2Compare),function(i)setdiff(DESeq2Compare[,i],comparison[,i]))
+differenceDESeqDf <- data.frame(differenceDESeq)
+
+summary(differenceDESeqDf)
+summary(differenceEdgeDf)
+```
+
+# 6. Use the compcodeR package to run the differential expression analysis using at least three different tools 
+# and compare and contrast the results following the compcodeR vignette.
+```{r}
+library(compcodeR)
+setwd("C:/Users/roygu/Documents/Rcourse/3/")
+
+# Creating a compData file.
+colData$condition <- colData$group
+info.parameters <- list(dataset = "mydata", uID = "123456")
+cpd <- compData(countData,colData,info.parameters)
+
+#cpdList <- convertcompDataToList(cpd)
+
+
+generateSyntheticData("mydata.rds", 
+                      n.vars = 19719, 
+                      samples.per.cond = 5, 
+                      n.diffexp = 19081, 
+                      output.file = "mydata.rds")
+
+
+
+# Run differential expression analysis.
+runDiffExp(data.file = "mydata.rds",
+           result.extent = "DESeq2", 
+           Rmdfunction = "DESeq2.createRmd",
+           output.directory = ".", 
+           fit.type = "parametric", 
+           test = "Wald", 
+           beta.prior = TRUE, 
+           independent.filtering = TRUE, 
+           cooks.cutoff = TRUE, 
+           impute.outliers = TRUE)
+
+library(DSS)
+runDiffExp(data.file = "mydata.rds", 
+           result.extent = "DSS", 
+           Rmdfunction = "DSS.createRmd",
+           output.directory = ".", 
+           norm.method = "quantile", 
+           disp.trend = TRUE)
+
+library(EBSeq)
+runDiffExp(data.file = "mydata.rds", 
+           result.extent = "EBSeq", 
+           Rmdfunction = "EBSeq.createRmd",
+           output.directory = ".", 
+           norm.method = "median")
+
+
+
+vignette("compcodeR")
+
+library(rpanel)
+runComparisonGUI(input.directories = ".", 
+                 output.directory = ".", recursive = FALSE)
+
+
+
+file.table <- data.frame(input.files =c("mydata_DESeq2.rds",
+                                         "mydata_DSS.rds", 
+                                        "mydata_EBSeq.rds"),
+                         stringsAsFactors = FALSE)
+
+runComparison(file.table = file.table, 
+                parameters = NULL, 
+                output.directory = ".")
+```
+
