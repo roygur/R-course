@@ -1,0 +1,764 @@
+---
+title: "Final project"
+author: "Roy Gurwicz"
+date: "10 2 2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# In vivo antiviral host transcriptional response to SARS-CoV-2 by gender and age.
+
+### Libraries.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(dplyr)
+library(DESeq2)
+library(PCAtools)
+library(limma)
+library("BiocParallel")
+library(ggplot2)
+library(EnhancedVolcano)
+library(pheatmap)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(ggnewscale)
+library(gprofiler2)
+library(NbClust)
+library(caret)
+library(pROC)
+```
+
+### Uploading the data and editing it.
+```{r}
+link = "C:/Users/roygu/Documents/Rcourse/project/"
+
+
+# Uploading the counts data, and making it a matrix. It contains the gene expression of every person. There are 484 person in the matrix, and 35784 genes.
+counts = as.matrix(read.table(paste0(link,"data/GSE152075_raw_counts_GEO.txt.gz"), header = T, stringsAsFactors = F))
+
+# Checking whether there is a na in the data, in order to analyse the data properly without mistakes.
+# There is no na in the data. it means all the data has count values and the analyse can continue without any manipulation to the matrix.
+anyNA(counts)
+
+
+# Uploading the metadata. it is important since it contains the data about every person.  438 person are infected, and 65 are healthy.
+gseGPL18573 = GEOquery::getGEO(filename=paste0(link,"data/GSE154770-GPL18573_series_matrix.txt.gz"))
+metadata = as.data.frame(x = gseGPL18573@phenoData@data[1:484,], 
+                         row.names = gseGPL18573@phenoData@data$title[1:484])
+
+# Making the relavent columns as factors for DESeq command. the main reason is so the deseq analysis will be done without troubles.
+metadata$geoAccession = factor(metadata$geo_accession)
+metadata$sars_cov_2.positivity = factor(metadata$`sars-cov-2 positivity:ch1`)
+metadata$n1_ct = factor(metadata$`n1_ct:ch1`)
+metadata$age = factor(metadata$`age:ch1`)
+metadata$gender = factor(metadata$`gender:ch1`)
+metadata$sequencing_batch = factor(metadata$`sequencing_batch:ch1`)
+
+
+# Removing unnecessary data.
+metadata = metadata %>% 
+  dplyr::select(geoAccession, sars_cov_2.positivity, n1_ct, age, gender, sequencing_batch)
+# We remained with a 6-column data frame, each in a format of factor.
+```
+
+## General analysis.
+### Normalization.
+```{r}
+# In order to normalize the data, for example to compare between long genes and short genes (the longer the gene, the less it is transcripted by the polymerase since it takes more time to make a RNA copy of this gene), we use the DESeq command of DESeq2 package. to use it, first we need to transform our data to DESeq data set.
+# I get a DESeq data set which is normalized using estimation of size factors, dispresion and Negative Binomial GLM fitting and Wald statistics.
+# This data set means I can compare between genes in the data set.
+# Since the data is big, and we want to measure the effect of the SARS CoV2 positivity influence, we used parallelized computation so that the memory computation is distributed, thus making it faster, and we put sars_cov_2.positivity in the design. it means the calculations are seperated into 4 groups and done silmutanously.
+register(SnowParam(4))
+dds = DESeqDataSetFromMatrix(countData = counts, 
+                             colData = metadata, 
+                             design = ~ sequencing_batch + sars_cov_2.positivity)
+# Removing batch effect in order to compare between tests from different batches using DESeq2 package, thus we added sequencing_batch to the design.
+# I got a matrix with normalized counts that their batch effect were removed. it means we removed changes in batches due to the change in the environment (for example using different pipetes for the same experiment may make differance in the quantities of things, and thus influence the data, and we tried to remove things like it). 
+
+# Pre-filtering genes with low reads from counts matrix, in order to decrease irrelavent data which slows down the calculations, and disrupt them.
+# I kept only the genes with at least 1 average count per a person. We started with 35784 features, and after this command we remained with only 16034 genes. It means there are about 20000 genes which are not expressed  in accordance to owr filter, and still were at the data.
+keep = rowSums(counts(dds)) >= 484
+dds = dds[keep,]
+
+
+dds = DESeq(object = dds, parallel = TRUE, BPPARAM = SnowParam(4))
+```
+
+
+### Visualization and ranking of genes.
+```{r}
+# Calculating log2fold change, p-values and p-adj in order to find genes which their expression changes in infected people, compared to uninfected ones.
+# 42 genes (0.26%) are elavated in the positive group (1) compared to the control (negative) group (0), and 46 genes (0.29%) have less counts.  14609 (91%) of the genes have low counts in both of the groups. it means there is a difference between infected and healthy people in the expression of 88 genes with 0.1 statistical significance.
+res = results(dds, 
+               contrast = c("sars_cov_2.positivity", "neg", "pos"),
+               parallel = TRUE, BPPARAM = SnowParam(4))
+summary(res)
+write.csv(as.data.frame(res), 
+          paste0(link, "1.ResultsOfAllGenes.csv"))
+
+# Saving the normalized counts, so we can get to it later.
+normCounts = as.data.frame(counts(dds, normalized = TRUE))
+write.csv(normCounts, 
+          paste0(link, "1.NormalizedCountsOfAllGenes.csv"))
+
+
+# Saving genes with padj<0.05.
+resSig05 = res[which(res$padj < 0.05 ), ] %>% 
+  as.data.frame() %>% 
+  arrange(padj)
+write.csv(resSig05, 
+          paste0(link, "2.ResultsOfSignificant_0.05_padj_genes.csv"))
+
+normSig05 = normCounts[rownames(resSig05),]
+write.csv(normSig05, 
+          paste0(link, "2.NormalizedCountsOfSignificant_0.05_padj_genes.csv"))
+```
+
+
+### Volcano plot.
+```{r}
+# Volcano plot was done, on the y-axis there is -log10(p-adj), and on the x-axis the log2Foldchange (LFC). It was done to visualize genes influenced from the SARS CoV 2 infection.
+# The genes with a positive LFC have higher counts at the SARS-CoV-2-positive group than the control group. For instance, CBX5. 
+# The genes with a negative LFC have lower counts at the SARS-CoV-2-positive group than the control group. For instance, CXCL10.
+# The higher the gene appears at the plot= the more statistically significance the gene has (higher p-adj).
+# Presenting only genes with a p.adj value (by dropping NA values). only 1424 genes were plotted.
+EnhancedVolcano(as.data.frame(res) %>% drop_na(),
+                title = "Volcano plot",
+                lab = rownames(as.data.frame(res) %>% drop_na()),
+                x = 'log2FoldChange',
+                y = 'padj',
+                labSize = 3,
+                FCcutoff = 1, pCutoff = 0.05, 
+                xlim = c(-5, 5), ylim = c(-0.1, 5))
+```
+
+
+### Heat map.
+```{r}
+df = metadata[, c("gender", "sars_cov_2.positivity")]
+colnames(df) = c("Gender", "Infenction Status")
+
+# Calculating the log2FoldChange of every gene manually to present on heatmap if the gene is elevated in the person or decreased in its expression.
+l2fc = (normSig05 + 1) # CXCL1 gene at POS51 (and other genes either) has value of 0. Since we want to do log- we added 1 to all values, so that every gene which has value of 0 will now have a log value of 0 (log2(1)=0)
+l2fc = l2fc / rowMeans(l2fc)
+l2fc = log2(l2fc)
+
+
+# Heat map using the log2foldChange of every gene to every person. Values red-colored are more expressed, and blue-colored have less expression values. 
+# The rows and cols are clustered using ward.D clustering method.
+# Most of the infected people are clustered together, but some are spread out.
+# It means the clustering is imperfect, or the infected persons which are not clustered together are close to healthy (for example, only started to be sick, or all the viruses in their body has died but the PCR still indicates them as ill).
+pheatmap(l2fc,
+         clustering_method = "ward.D",
+         show_colnames = FALSE,
+         fontsize = 5,
+         annotation_col = df)
+```
+
+
+### PCA
+```{r}
+# Lowering dimesions into 2D, in order to visualize the influence of the top influencing genes (found previously).
+# I did PCA plot and markered the SARS CoV 2 status. The infected people are separated from the control healthy people in PC1-PC2-2D-plot (down left). it means there is a real biological change between these two groups.
+pcaResults <- PCAtools::pca(mat = assay(vst(dds, blind = TRUE))[rownames(normSig05),])
+pcaResults$metadata <- metadata
+PCAtools::biplot(pcaobj = pcaResults, 
+                   colby = "sars_cov_2.positivity",
+                   legendPosition = "bottom",
+                   title = paste0("PCA on the top-",nrow(normSig05)," most variable genes"),
+                   lab=NULL)
+
+# PC loadings plot.
+# In order to understand the influence of every gene to the PC1-PC2-plot, we plotted the influence of with an arrow.
+pc_loadings = pcaResults[["loadings"]] %>% 
+  as_tibble(rownames = "gene")
+
+
+# Since the plot is too dense we plotted only 5 genes which are the most influencing PC loadings genes.
+top_genes5 <- pc_loadings %>% 
+  # select only the PCs we are interested in
+  dplyr::select(gene, PC1, PC2) %>%
+  # convert to a "long" format
+  pivot_longer(matches("PC"), names_to = "PC", values_to = "loading") %>% 
+  # for each PC
+  group_by(PC) %>% 
+  # arrange by descending order of loading
+  arrange(desc(abs(loading))) %>%
+  # take the 5 top rows
+  slice(1:5) %>% 
+  # pull the gene column as a vector
+  pull(gene) %>% 
+  # ensure only unique genes are retained
+  unique()
+
+# Filtering only to 5 genes we selected previusly.
+top_loadings5 <- pc_loadings %>% 
+  filter(gene %in% top_genes5)
+
+#plot the genes with their PC loadings of PC1,2.
+ggplot(data = top_loadings5) +
+  geom_segment(aes(x = 0, y = 0, xend = PC1, yend = PC2), 
+               arrow = arrow(length = unit(0.1, "in")),
+               colour = "brown") +
+  geom_text(aes(x = PC1, y = PC2, label = gene),
+            nudge_y = 0.005, size = 3) +
+  scale_x_continuous(expand = c(0.02, 0.02)) +
+  labs(title = "PC loadings")+
+  xlab("PC1") +
+  ylab("PC2")
+
+
+# Saving the PC loading of all 43 genes in all 43 PCs.
+write.csv(pc_loadings, 
+          paste0(link, "3.PCALoadings.csv"))
+
+# All genes except for MTRNR2L12 pull the persons to the positive side of PC1, whereas MTRNR2L12 pulls to the right. 
+# This gene would have a small arrow if plotted, since the PC-loadings of the gene in PC1 and PC2 is very small. In other words, the influence of this gene in the PC is pretty weak.
+```
+
+
+### GO analysis.
+```{r}
+# Extract significant results (p-adj. is lower than 0.05 and is not NA, and the abs(log2FoldChange) is higher than 1). The genes were seperated to genes which are upregulated (log2FoldChange>1), and genes which are downregulated (log2FoldChange<-1).
+# We did it to learn about the effects of the affected genes, so that we could understand the affect of SARS-CoV2 infection on humanic cells both in activating and inhibiting the expression of infected persons.
+signif_res_up <- res[res$padj < 0.05 & (res$log2FoldChange) > 1 & !is.na(res$padj), ]
+signif_genes_up <- rownames(signif_res_up)
+
+signif_res_dn <- res[res$padj < 0.05 & (res$log2FoldChange)< -1 & !is.na(res$padj), ]
+signif_genes_dn <- rownames(signif_res_dn)
+
+# Doing GO analysis to both upregulated and downregulated genes, in order to understand their effect on human cells.
+ego.up <- enrichGO(gene = signif_genes_up,
+                universe = rownames(normCounts),
+                keyType = "SYMBOL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff = 0.05,
+                readable = FALSE)
+ego.up@result %>% filter(p.adjust<=0.05)
+# The cytoplasmic translation and translational initiation are upregulated. This is expected as the virus tries to translate its genes as much as it can.
+
+ego.dn <- enrichGO(gene = signif_genes_dn,
+                universe = rownames(normCounts),
+                keyType = "SYMBOL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff = 0.05,
+                readable = FALSE)
+ego.dn@result %>% filter(p.adjust<=0.05)
+# Most of the downregulated genes are the responsible for the defense of the cells against viruses. It means the virus inhibits the cellular defence against it.
+
+
+# Doing a similarity map in order to visualize the linkage between the 10 most statistically relavent GO defenitions.
+pairEGOup <- pairwise_termsim(ego.up)
+emapplot(pairEGOup, showCategory=10)
+# Only 2 definitions are upregulated. They are linked to each other, meaning there is a connection between them. Indeed, the cytoplasmatic translation is one major part of the cellular translation components.
+
+pairEGOdn <- pairwise_termsim(ego.dn)
+emapplot(pairEGOdn, showCategory=10)
+# In many infections, the cellular response to interferon alpha (which is a cytokine produced by the innate immune system) is the activator of the defense response to viruses.
+
+
+# In order to understand in more detail the linkages of genes and enriched concepts, we plotted a cnet plot.
+cnetplot(ego.up,
+         categorySize="pvalue",
+         showCategory = 8,
+         foldChange= resSig05$log2FoldChange,
+         vertex.label.font=6)
+# Both of the GO concepts are linked with 3 proteins: RPL13A (translated to a protein that is a component of the 60S subunit of the ribosome https://www.ncbi.nlm.nih.gov/gene/23521),RPS3A (translates to S3A protein which is a part of the 40S ribosomal subunit https://www.genecards.org/cgi-bin/carddisp.pl?gene=RPS3A), and RPS17 (translates to S17 ribosomal protein, which is located in the cytosol https://www.genecards.org/cgi-bin/carddisp.pl?gene=RPS17). Besides them, there are 5 more proteins which are upregulated and relate only to cytoplasmic translation GO term.
+
+cnetplot(ego.dn,
+         categorySize="pvalue",
+         showCategory = 6,
+         foldChange= resSig05$log2FoldChange,
+         vertex.label.font=6)
+# The GO annotations are separated into 2 groups, defense response to virus, and regulation of virus genome and life cycle.
+# It means the virus inhibits the cellular response against it, and thus can grow/be grown inside the cells almost without any resistance.
+```
+
+
+## Caret- unsupervised machine learning.
+We aim to identify sick people based on their RNA-seq.
+```{r}
+library(caret)
+# The data needs to be transformed to do use caret's Knn machine learning. also, we did log10 to observe the differece between the expression of different genes. most of the genes have low reads, and only numerous genes have high expression. with log transofrmation we can observe their expression properly and we deal with outlayers. 
+hist(normCounts[,5],xlab="gene expression",main="",border="blue4",
+     col="cornflowerblue")
+
+tgexp = t(log10(normCounts + 1))
+anyNA(tgexp)
+hist(tgexp[,5],xlab="gene expression",main="",border="blue4",
+     col="cornflowerblue")
+
+
+
+# removing near zero variation for the genes (in the columns). At least 85% of the values are similar, and this function filters them but doesn't apply it yet. we do it to reduce noise, so that the machine learning will be most accurate.
+nzv = preProcess(tgexp,
+                 method="nzv",
+                 uniqueCut = 15)
+# apply the filter we did with preProcess using "predict" function. it returns the filtered dataset and assigns it to nzv_tgexp.
+nzv_tgexp = predict(nzv,tgexp)
+# Only 15842 genes were kept.
+
+# top variable features, in order to reduce the number of genes, so the calculations will be done much faster.
+SDs = apply(nzv_tgexp,2,sd )
+topPreds = order(SDs,decreasing = TRUE)[1:500]
+tgexp = nzv_tgexp[,topPreds]
+
+# Centering the data, to avoid issues like multicollinearity, which can affect our model convergence.
+processCenter = preProcess(tgexp, 
+                         method = c("center"))
+tgexp = predict(processCenter,tgexp)
+
+
+# we create a filter for removing highly correlated variables. if two variables are highly correlated only one of them is removed. the reason we do it is to remove genes which are very similar, and to stay only with genes with difference. thus, using minimum of genes in the machine learning.
+corrFilt=preProcess(tgexp, method = "corr",cutoff = 0.9)
+tgexp=predict(corrFilt,tgexp)
+anyNA(tgexp)
+
+# Merging with meatadata to have the data about who is infected and who is healthy.
+tgexp=merge(metadata,tgexp,by="row.names")
+# push sample ids back to the row names
+rownames(tgexp)=tgexp[,1]
+tgexp=tgexp[,-c(1,2,4:9)]
+
+
+set.seed(3031) # set the random number seed for reproducibility 
+
+# get indices for 70% of the data set, so we will have data to train on, and data to examine the success.
+intrain <- createDataPartition(y = tgexp[,1], p= 0.7)[[1]]
+
+# seperate test and training sets
+training <- tgexp[intrain,]
+testing <- tgexp[-intrain,]
+
+
+
+## Prediction with k-NN
+# It finds the k most close persons to a person in euclidean distance, and count how much are ill and how much are not.
+knnFit=knn3(x = training[,-1], # training set
+            y = training[,1], # training set class labels
+            k = 3)
+## predictions on the test set
+# Getting score on every test.
+trainPredTest = predict(knnFit,testing[,-1])
+trainPredTest
+
+
+## predictions on the training set
+# Getting the possible scores. positive or negative.
+trainPred = predict(knnFit,training[,-1],type="class")
+
+
+# compare the predicted labels of the knn, to real labels
+confusionMatrix(data=training[,1],reference=trainPred)
+# We have 330 pepole which were guessed correctly, 8 pepole thought to be positive though they were negative (uninfected), and 1 vice versa.
+
+
+## predictions on the test set.
+# return the class labels.
+testPred=predict(knnFit,testing[,-1],type="class")
+
+# compare the predicted labels to real labels, and seeing if it worked good.
+# get different performance metrics
+confusionMatrix(data=testing[,1],reference=testPred)
+# we have 140 people guessed correctly, and 5 which were thought to be positive, but they are healthy.
+
+
+
+
+# get k-NN class probabilities to understand how good our knn machine learning is.
+# prediction probabilities on the test set
+testProbs=predict(knnFit,testing[,-1])
+
+# get the roc curve
+# Response= מה הלייבלים האמיתיים
+#Predictor =  מה הפרדיקציה שלהם.
+rocCurve <- pROC::roc(response = testing[,1],
+                predictor = testProbs[,1],
+              ## This function assumes that the second class is the class of interest, so we reverse the labels.
+              levels = rev(levels(testing[,1])))
+# plot the curve
+plot(rocCurve, legacy.axes = TRUE)
+# The curve is vertical until 0.7, then it is a bit less vertical intil 0.9 (of axis y), and then it is almos horizontal. it means the knn data is pretty good.
+
+pROC::auc(rocCurve)
+# The area under the curve is 0.9254. it is mignificent!!!! it means our data is pretty good, and we can guess with it if a person is sick or not with SARS CoV 2 pretty good.
+```
+
+```{r}
+## Model tuning and avoiding overfitting in order to find the best k to use.
+
+# This is done for the train data.
+set.seed(101)
+k=1:12 # set k values
+trainErr=c() # set vector for training errors
+for( i in k){
+  knnFit=knn3(x=training[,-1], # training set
+              y=training[,1], # training set class labels
+              k=i)
+
+  # predictions on the training set
+  class.res=predict(knnFit,training[,-1],type="class")
+
+  # training error
+  err=1-confusionMatrix(training[,1],class.res)$overall[1]
+  trainErr[i]=err
+}
+
+# plot training error vs k with a smooth line for the trend
+plot(k,trainErr,type="p",col="#CC0000",pch=20)
+lines(loess.smooth(x=k, trainErr,degree=2),col="#CC0000")
+
+
+
+# This is done for the test data.
+set.seed(31)
+k=1:12
+testErr=c()
+for( i in k){
+  knnFit=knn3(x=training[,-1], # training set
+              y=training[,1], # training set class labels
+              k=i)
+
+  # predictions on the training set
+  class.res=predict(knnFit,testing[,-1],type="class")
+  testErr[i]=1-confusionMatrix(testing[,1],
+                                 class.res)$overall[1]
+ 
+}
+
+# plot training error with a smooth line for the trend
+plot(k,trainErr,type="p",col="#CC0000",
+     ylim=c(0.000,0.08),
+     ylab="prediction error (1-accuracy)",pch=19, sub = "test in green, train in red")
+lines(loess.smooth(x=k, trainErr,degree=2), col="#CC0000")
+
+# plot test error
+points(k,testErr,col="#00CC66",pch=19) 
+lines(loess.smooth(x=k,testErr,degree=2), col="#00CC66")
+
+
+## Cross validation
+set.seed(17)
+# this method controls everything about training
+# we will just set up 100 bootstrap samples and for each 
+# bootstrap OOB samples to test the error
+trctrl <- trainControl(method = "boot",number=20,
+                       returnResamp="all")
+
+# we will now train k-NN model
+knn_fit <- train(sars_cov_2.positivity~., data = training, 
+                 method = "knn",
+                 trControl=trctrl,
+                 tuneGrid = data.frame(k=1:12))
+
+# best k value by cross-validation accuracy
+knn_fit$bestTune
+# It seems that the best k is 3, as we used.
+
+plot(x=1:length(knn_fit$results[,2]),
+     1-knn_fit$results[,2],
+     pch=19,
+     ylab="prediction error",xlab="k")
+lines(loess.smooth(x=1:12,1-knn_fit$results[,2],degree=2),
+      col="#CC0000")
+# Now we have a machine that gets the RNA-seq of a patients nasalpharynx cells as input, and output whether he is infected with SARS CoV 2 or not.
+```
+
+
+
+## Gender specific anlysis.
+### Normalization.
+```{r}
+# Removing all data which does not contain information about gender. this is since we want to analyze the change in gender between sick and healthy people.
+metadataGender = metadata %>%
+  filter(gender != "not collected") %>% 
+  rownames_to_column()
+# Only 431 persons have their gender collected.
+
+countsGender = counts %>%
+  as.data.frame() %>%
+  dplyr::select(metadataGender$rowname)
+
+anyNA(countsGender)
+anyNA(metadataGender)
+
+
+metadataGender$gender = factor(metadataGender$gender)
+# The normalization method is very similar to the first normalization method. However, this time the design is addressed to answer the difference between infected and uninfected people with different gender.
+register(SnowParam(4))
+dds = DESeqDataSetFromMatrix(countData = countsGender, 
+                             colData = metadataGender, 
+                             design = ~ sequencing_batch + gender + sars_cov_2.positivity +  gender:sars_cov_2.positivity)
+
+keep = rowSums(counts(dds)) >= nrow(metadataGender)
+dds = dds[keep,]
+# Only 16100 genes have an average of 1 count per person. As mentioned previously, it means the filtered genes (which are not part of the 16100 genes) have low counts, and thus are probably less relavent.
+
+dds = DESeq(object = dds, parallel = TRUE, BPPARAM = SnowParam(4))
+```
+
+### Visualization and ranking of genes.
+```{r}
+# Calculating log2fold change, p-values and p-adj in order to find genes which their expression changes in infected people, compared to uninfected ones and in comparison between different gender.
+resultsNames(dds)
+resPosFvsM = results(dds, 
+                     parallel = TRUE, 
+                     BPPARAM = SnowParam(4), 
+                     name = "genderM.sars_cov_2.positivitypos") 
+# We aim to understand whether the infection of SARS CoV 2 effect differently different genders.
+# 31 genes differ between males and females when they are infected or uninfected, with p.adj<0.1. it means there is a difference with different gender, in the infection of SARS CoV-2.
+summary(resPosFvsM)
+write.csv(as.data.frame(resPosFvsM), 
+          paste0(link, "GenderAnalysis/1.ResultsOfAllGenes.csv"))
+
+
+normCounts = as.data.frame(counts(dds, normalized = TRUE))
+write.csv(normCounts, 
+          paste0(link, "GenderAnalysis/1.NormalizedCountsOfAllGenes.csv"))
+# We write this line again so that people could run this chunk without previous chunks (except the first 2). this we did since deseq analysis takes a lot of time.
+
+# Again, saving results about genes which are statistically significant (p.adj<0.1)
+resPosFvsMSig = resPosFvsM[which(resPosFvsM$padj < 0.1), ] %>% 
+  as.data.frame() %>% 
+  arrange(padj)
+write.csv(resPosFvsMSig, 
+          paste0(link, "GenderAnalysis/2.ResultsOfSignificant_0.1_padj_genes.csv"))
+
+normresPosFvsMSig = normCounts[rownames(resPosFvsMSig),]
+write.csv(normresPosFvsMSig, 
+          paste0(link, "GenderAnalysis/2.NormalizedCountsOfSignificant_0.1_padj_genes.csv"))
+```
+
+### Ploting genes with expression differance when infected or not in different gender.
+```{r}
+# Making df with all the data we need for the plot. we get top genes with information about the people.
+mergedDF = normresPosFvsMSig %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column() %>%
+  full_join(metadataGender, by = "rowname") %>%
+  `rownames<-`(.[,1]) %>% 
+  dplyr::select(-rowname) %>%
+  pivot_longer(!c(geoAccession, sars_cov_2.positivity, n1_ct, age, gender, sequencing_batch)) 
+
+# Plotting the genes which their expression is changed between males and females with different infection status. we get a boxplot of all the relavent genes, seperated with different gender and with different covid status (infected or uninfected).
+# It can be seen that there is a real difference between genders and infection status in several genes!
+ggplot(mergedDF, aes(x = gender, y = value, fill = sars_cov_2.positivity)) +
+  geom_boxplot(outlier.size = 0.5) + 
+  facet_wrap(vars(name), ncol = 8) +
+  geom_point(size = 0.25, position = position_jitterdodge(jitter.width = 0.2)) +
+  scale_y_log10() +
+  xlab("Gender") +
+  ylab("logNormalized Counts") +
+  theme(legend.position = "bottom",
+    legend.title = element_text(size = 6),
+    title = element_text(size = 7),
+    axis.title.x = element_text(size = 6),
+    axis.title.y = element_text(size = 6),
+    axis.text.x = element_text(size = 5),
+    axis.text.y = element_text(size = 5))
+# As it can be seen, there is an expression difference in these 23 genes. It means there is a difference between males and females in the course of the Covid19 disease.
+```
+
+#### Go anotation.
+In order to understand what do these 20 genes do, we will do GO anotation to them.
+```{r}
+# Extract significant results (p-adj. is lower than 0.1 and is not NA). 
+# We did it to learn about the role of the affected genes, so that we could understand the affect of SARS-CoV2 infection on humanic cells.
+signif_res <- resPosFvsM[resPosFvsM$padj < 0.1 & !is.na(resPosFvsM$padj), ]
+signif_genes <- rownames(signif_res)
+
+
+# Doing GO analysis to both upregulated and downregulated genes, in order to understand their effect on human cells.
+ego.up <- enrichGO(gene = signif_genes,
+                universe = rownames(normCounts),
+                keyType = "SYMBOL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff = 0.05,
+                readable = FALSE)
+ego.up@result %>% filter(p.adjust<=0.05)
+# The main differences is in immune features. For example, cell chemotaxis which is important in driving the immune cells to the infection area, immune response-regulating signaling pathway and activation of immune response.
+
+
+
+# Doing a similarity map in order to visualize the linkage between the 20 most statistically relavent GO defenitions.
+pairEGOup <- pairwise_termsim(ego.up)
+emapplot(pairEGOup, showCategory=20) +
+  theme(legend.position = "none")
+# As most of the GO annotations link to each other, monocarboxylic acid transport is linked only to leukocye aggregation.
+# monocarboxylic acid transport is annotated due to 3 genes- AQP9, IL1B and SLC16A4- 3 of which are statistically significantly more activated when men are infected than when women do. this is important to drive molecules inside the mitochondria. those 3 genes are pretty similar in their expression after infection between males and females. 
+
+
+cnetplot(ego.up,
+         categorySize="pvalue",
+         showCategory = 8,
+         foldChange= resPosFvsMSig$log2FoldChange,
+         vertex.label.font=6)
+```
+
+
+
+
+## Age specific anlysis.
+We aim to understand whether the expression of infected people is different due to age.
+### Normalization.
+```{r}
+# Removing all data which does not contain information about gender.
+metadataAge = metadata %>%
+  filter(age != "Unknown") %>% 
+  rownames_to_column()
+# Changing "90+" to 90 so that all data contains only numbers.
+metadataAge$age = unfactor(metadataAge$age)
+metadataAge[metadataAge$age == "90+",]$age = "90"
+
+# Visualizing the ages in histogram.
+hist(as.numeric(metadataAge$age))
+# it seems that the data can be divided to groups of 10 years with more than 30 persons in each group besides under 20 years old. 
+
+metadataAge[as.numeric(metadataAge$age) <=12,]
+# there is one person which is under 10 years old. it seems as a mistake since there is next youngest persons are 12 years old, however, since we aim to cluster all  under 30 together to have similar lengths of age groups- we guess the person is in his twenties, and thus is a part of the group.
+
+# deviding the metadata into age groups, in order to get information about a scale of ages. This specific ages were selected since there is a major physiological difference between this ages, and the virus is more dangerous.
+metadataAge$ageGroup = rep("LessThan60", nrow(metadataAge))
+metadataAge[metadataAge$age >= 60,]$ageGroup = "SixtyPlus"
+
+
+# Visualizing the groups which we sorted.
+ggplot(data = metadataAge, aes(x = ageGroup)) +
+  geom_bar()
+
+
+# The new counts matrix should include only people which their age is known. therefore, as before, we first filtered the metadata, and than used the filtered metadata to select only the people we want (the ones which their age is known).
+countsAge = counts %>%
+  as.data.frame() %>%
+  dplyr::select(metadataAge$rowname)
+
+anyNA(countsAge)
+anyNA(metadataAge)
+
+
+
+# The normalization method is very similar to the first normalization method. However, this time the design is addressed to answer the difference between infected and uninfected people with different age group.
+metadataAge$sequencing_batch = factor(metadataAge$sequencing_batch)
+metadataAge$ageGroup = factor(metadataAge$ageGroup)
+metadataAge$sars_cov_2.positivity = factor(metadataAge$sars_cov_2.positivity)
+rownames(metadataAge) = metadataAge$rowname
+
+register(SnowParam(4))
+dds = DESeqDataSetFromMatrix(countData = countsAge, 
+                             colData = metadataAge, 
+                             design = ~ sequencing_batch + ageGroup + sars_cov_2.positivity +  ageGroup:sars_cov_2.positivity)
+
+keep = rowSums(counts(dds)) >= nrow(metadataAge)
+dds = dds[keep,]
+
+
+dds = DESeq(object = dds, 
+            parallel = TRUE, 
+            BPPARAM = SnowParam(4))
+```
+
+
+### Visualization and ranking of genes.
+```{r}
+# Calculating log2fold change, p-values and p-adj in order to find genes which their expression changes in infected people, compared to uninfected ones and in comparison between different age groups.
+# 9 genes differ between young and old when they are infected or uninfected, with p.adj<0.1.
+resPosAge = results(dds, parallel = TRUE, BPPARAM = SnowParam(4))
+# We aim to understand whether the infection of SARS CoV 2 effect differently different age groups. 
+write.csv(as.data.frame(resPosAge), 
+          paste0(link, "AgeAnalysis/1.ResultsOfAllGenes.csv"))
+
+summary(resPosAge)
+normCounts = as.data.frame(counts(dds, normalized = TRUE))
+write.csv(normCounts, 
+          paste0(link, "AgeAnalysis/1.NormalizedCountsOfAllGenes.csv"))
+
+# We want only genes which their fold change is higher than 2^1.5 or lower than 2^-1.5. this way we get genes which realy differ between the different age groups.
+resPosAgeSig = resPosAge[which(resPosAge$padj < 0.1 & ((resPosAge$log2FoldChange > 1.5) | resPosAge$log2FoldChange < -1.5)), ] %>% 
+  as.data.frame() %>% 
+  arrange(padj)
+write.csv(resPosAgeSig, 
+          paste0(link, "AgeAnalysis/2.ResultsOfSignificant_0.1_padj_genes.csv"))
+
+normresPosAgeSig = normCounts[rownames(resPosAgeSig),]
+write.csv(normresPosAgeSig, 
+          paste0(link, "AgeAnalysis/2.NormalizedCountsOfSignificant_0.1_padj_genes.csv"))
+```
+
+
+### Ploting genes with expression differance when infected or not in different gender.
+```{r}
+mergedDF = normresPosAgeSig %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column() %>%
+  full_join(metadataAge, by = "rowname") %>%
+  `rownames<-`(.[,1]) %>% 
+  dplyr::select(-rowname) %>%
+  pivot_longer(!c(geoAccession, sars_cov_2.positivity, n1_ct, age, gender, sequencing_batch, ageGroup)) 
+
+# Plotting the genes which their expression is changed between males and females with different infection status.
+ggplot(mergedDF, aes(x = ageGroup, y = value, fill = sars_cov_2.positivity)) +
+  geom_boxplot(outlier.size = 0.5) + 
+  facet_wrap(vars(name), ncol = 8) +
+  geom_point(size = 0.25, position = position_jitterdodge(jitter.width = 0.2))+
+  scale_y_log10() +
+  xlab("Age group") +
+  ylab("logNormalized Counts") +
+  theme(legend.position = "bottom",
+    legend.title = element_text(size = 6),
+    title = element_text(size = 7, face = "italic"),
+    axis.title.x = element_text(size = 6, face = "plain"),
+    axis.title.y = element_text(size = 6, face = "plain"),
+    axis.text.x = element_text(size = 5),
+    axis.text.y = element_text(size = 5))
+# As it can be seen, there is an expression difference in these 23 genes. It means there is a difference between males and females in the course of the Covid19 disease.
+```
+
+
+#### Go anotation.
+In order to understand what do these 20 genes do, we will do GO anotation to them.
+```{r}
+# Extract significant results (p-adj. is lower than 0.1 and is not NA). 
+# We did it to learn about the role of the affected genes, so that we could understand the affect of SARS-CoV2 infection on humanic cells.
+signif_res <- resPosAge[resPosAge$padj < 0.1 & !is.na(resPosAge$padj), ]
+signif_genes <- rownames(signif_res)
+
+
+# Doing GO analysis to both upregulated and downregulated genes, in order to understand their effect on human cells.
+ego.up <- enrichGO(gene = signif_genes,
+                universe = rownames(normCounts),
+                keyType = "SYMBOL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff = 0.05,
+                readable = FALSE)
+ego.up@result %>% filter(p.adjust<=0.05)
+# The main differences is antimicrobial humoral response. 2 genes are responsible for this- CXCL1 which is upregulated in all age groups, however less in old people, and JCHAIN which is downregulated in young people, and upregulated in old.
+
+
+pairEGOup <- pairwise_termsim(ego.up)
+emapplot(pairEGOup, showCategory=20) +
+  theme(legend.position = "none")
+# We got only antimicrobial humoral response, as a result of the genes CXCL11 and JCHAIN which are expressed at over 60 infected people, in comparison to younger people.
+
+
+cnetplot(ego.up,
+         categorySize="pvalue",
+         showCategory = 8,
+         foldChange= resPosAgeSig$log2FoldChange,
+         vertex.label.font=6)
+# What we wrote in the previous line can be better seen with this plot.
+```
+
